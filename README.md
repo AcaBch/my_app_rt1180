@@ -63,7 +63,10 @@ minicom -D /dev/ttyACM0 -b 115200 -o
 | `led on` | Turn LED on |
 | `led off` | Turn LED off |
 | `led toggle` | Toggle LED |
-| `status` | Show system status |
+| `status` | Show system status (IP, LED, uptime, network) |
+| `raw_eth status` | Show raw Ethernet socket state and RX/TX counters |
+| `raw_eth send goose <mac>` | Send a test GOOSE frame (EtherType 0x88B8) to `<mac>` |
+| `raw_eth send rstp` | Send a test RSTP BPDU to `01:80:C2:00:00:00` |
 
 ## Web Terminal Commands
 
