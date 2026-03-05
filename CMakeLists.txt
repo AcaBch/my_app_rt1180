@@ -5,4 +5,5 @@ project(my_app_rt1180)
 
 target_sources(app PRIVATE
     src/main.c
+    src/raw_eth.c
 )

@@ -11,6 +11,7 @@ Custom Zephyr RTOS application for the **NXP MIMXRT1180-EVK** board (CM33 core).
 - **GPIO** — LED (D7) control and button (SW8) interrupt
 - **Zephyr Shell** — interactive shell over UART
 - **REST API** — JSON status endpoint at `/api/status`
+- **Raw Ethernet framework** — AF_PACKET Layer 2 RX/TX for GOOSE, RSTP, HSR, PRP
 
 ## Hardware
 
@@ -90,6 +91,45 @@ Available at `https://192.168.0.132/terminal`:
 | `GET /led/toggle` | Toggle LED |
 | `GET /terminal` | Web terminal |
 | `GET /exec?cmd=<cmd>` | Execute web terminal command |
+
+## Raw Ethernet Framework (GOOSE / RSTP / HSR / PRP)
+
+Implemented in `src/raw_eth.c` / `src/raw_eth.h`. An `AF_PACKET SOCK_RAW` socket
+captures all Layer 2 frames in a dedicated RX thread. Incoming frames are
+dispatched by EtherType to protocol-specific stub handlers ready for real logic.
+
+| Protocol | EtherType | Destination MAC |
+|----------|-----------|-----------------|
+| GOOSE (IEC 61850-8-1) | `0x88B8` | `01:0C:CD:04:00:xx` |
+| RSTP BPDU (IEEE 802.1w) | LLC (length < 0x0600) | `01:80:C2:00:00:00` |
+| HSR tag (IEC 62439-3) | `0x892F` | — |
+| HSR/PRP supervision | `0x88FB` | `01:15:4E:00:01:00` |
+
+### Kconfig options added
+
+```
+CONFIG_NET_SOCKETS_PACKET=y               # AF_PACKET socket support
+CONFIG_NET_ETHERNET_FORWARD_UNRECOGNISED_ETHERTYPE=y  # pass custom EtherTypes up
+CONFIG_NET_PROMISCUOUS_MODE=y             # receive all L2 multicasts
+```
+
+### Shell commands
+
+| Command | Description |
+|---------|-------------|
+| `raw_eth status` | Socket state and per-protocol RX/TX counters |
+| `raw_eth send goose <mac>` | Send a test GOOSE frame to `<mac>` |
+| `raw_eth send rstp` | Send a test RSTP BPDU to `01:80:C2:00:00:00` |
+
+### Notes
+
+- The RX thread starts after `network_ready` and runs at priority 7.
+- Stub handlers (`goose_rx`, `rstp_rx`, `hsr_rx`, `hsr_prp_supervision_rx`) log
+  the incoming frame and are ready for protocol-specific payload parsing.
+- Requires a **direct physical Ethernet connection** or a switch that forwards
+  the relevant EtherTypes/multicast groups. VM NAT mode will not pass raw L2 frames.
+
+---
 
 ## TLS Certificate
 

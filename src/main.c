@@ -22,6 +22,9 @@
 /* Include generated certificates */
 #include "certs.h"
 
+/* Raw Ethernet framework (GOOSE/RSTP/HSR/PRP) */
+#include "raw_eth.h"
+
 LOG_MODULE_REGISTER(my_app_rt1180, LOG_LEVEL_INF);
 
 /* TLS credential tag */
@@ -46,7 +49,7 @@ static volatile int led_on = 0;
 
 /* Network management callback */
 static struct net_mgmt_event_callback mgmt_cb;
-static bool network_ready = false;
+bool network_ready = false;
 static char ip_addr_str[NET_IPV4_ADDR_LEN] = "192.168.0.132";
 
 /* Button pressed callback */
@@ -683,6 +686,9 @@ int main(void)
 			K_THREAD_STACK_SIZEOF(http_stack),
 			http_redirect_thread, NULL, NULL, NULL,
 			HTTP_PRIORITY, 0, K_NO_WAIT);
+
+	/* Start raw Ethernet framework (GOOSE/RSTP/HSR/PRP) */
+	raw_eth_start();
 
 	/* Main loop */
 	while (1) {
