@@ -172,7 +172,8 @@ static const char terminal_html[] =
 	"</div></div>"
 	"<div class=\"help\">"
 	"<b>Available commands:</b> help, status, led on, led off, led toggle, "
-	"uptime, version, threads, net status, reboot"
+	"uptime, version, threads, net status, reboot, "
+	"raw_eth status, raw_eth send goose &lt;mac&gt;, raw_eth send rstp"
 	"</div>"
 	"<script>"
 	"const output=document.getElementById('output');"
@@ -220,16 +221,19 @@ static int execute_web_cmd(const char *cmd, char *output, size_t output_size)
 	if (strcmp(cmd, "help") == 0) {
 		len = snprintf(output, output_size,
 			"Available commands:\n"
-			"  help        - Show this help\n"
-			"  status      - Show system status\n"
-			"  led on      - Turn LED on\n"
-			"  led off     - Turn LED off\n"
-			"  led toggle  - Toggle LED\n"
-			"  uptime      - Show uptime\n"
-			"  version     - Show version info\n"
-			"  threads     - List kernel threads\n"
-			"  net status  - Show network status\n"
-			"  reboot      - Reboot the system");
+			"  help                          - Show this help\n"
+			"  status                        - Show system status\n"
+			"  led on                        - Turn LED on\n"
+			"  led off                       - Turn LED off\n"
+			"  led toggle                    - Toggle LED\n"
+			"  uptime                        - Show uptime\n"
+			"  version                       - Show version info\n"
+			"  threads                       - List kernel threads\n"
+			"  net status                    - Show network status\n"
+			"  reboot                        - Reboot the system\n"
+			"  raw_eth status                - Raw Ethernet RX/TX counters\n"
+			"  raw_eth send goose <mac>      - Send test GOOSE frame\n"
+			"  raw_eth send rstp             - Send test RSTP BPDU");
 	} else if (strcmp(cmd, "status") == 0) {
 		len = snprintf(output, output_size,
 			"==== System Status ====\n"
@@ -296,6 +300,32 @@ static int execute_web_cmd(const char *cmd, char *output, size_t output_size)
 			ip_addr_str);
 	} else if (strcmp(cmd, "reboot") == 0) {
 		len = snprintf(output, output_size, "Rebooting in 2 seconds...");
+	} else if (strcmp(cmd, "raw_eth status") == 0) {
+		len = raw_eth_status_str(output, output_size);
+	} else if (strncmp(cmd, "raw_eth send goose ", 19) == 0) {
+		const char *mac_str = cmd + 19;
+		uint8_t dst[6];
+		unsigned int b[6];
+		if (sscanf(mac_str, "%x:%x:%x:%x:%x:%x",
+			   &b[0], &b[1], &b[2], &b[3], &b[4], &b[5]) == 6) {
+			for (int i = 0; i < 6; i++) {
+				dst[i] = (uint8_t)b[i];
+			}
+			int ret = raw_eth_test_send_goose(dst);
+			len = snprintf(output, output_size,
+				ret > 0 ? "GOOSE test frame sent to %s (%d bytes)"
+					: "goose_send failed: %d",
+				mac_str, ret);
+		} else {
+			len = snprintf(output, output_size,
+				"Usage: raw_eth send goose <xx:xx:xx:xx:xx:xx>");
+		}
+	} else if (strcmp(cmd, "raw_eth send rstp") == 0) {
+		int ret = raw_eth_test_send_rstp();
+		len = snprintf(output, output_size,
+			ret > 0 ? "RSTP BPDU test frame sent to 01:80:C2:00:00:00 (%d bytes)"
+				: "rstp_send_bpdu failed: %d",
+			ret);
 	} else if (cmd[0] == '\0') {
 		len = 0;
 	} else {

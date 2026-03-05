@@ -293,6 +293,46 @@ void raw_eth_start(void)
 }
 
 /* ================================================================
+ * Web terminal helpers
+ * ================================================================ */
+
+int raw_eth_status_str(char *buf, size_t buf_size)
+{
+	return snprintf(buf, buf_size,
+		"=== Raw Ethernet Framework ===\n"
+		"Socket fd : %d (%s)\n"
+		"RX GOOSE  : %u\n"
+		"RX RSTP   : %u\n"
+		"RX HSR    : %u\n"
+		"RX HSR/sup: %u\n"
+		"RX total  : %u\n"
+		"TX total  : %u",
+		raw_sock, raw_sock >= 0 ? "open" : "not open",
+		rx_goose, rx_rstp, rx_hsr, rx_hsr_sup, rx_total, tx_count);
+}
+
+int raw_eth_test_send_goose(const uint8_t *dst)
+{
+	static const uint8_t test_goose[] = {
+		0x61, 0x04, 0x00, 0x00, 0x00, 0x00
+	};
+	return goose_send(dst, test_goose, sizeof(test_goose));
+}
+
+int raw_eth_test_send_rstp(void)
+{
+	static const uint8_t test_bpdu[] = {
+		0x00, 0x00, 0x02, 0x02, 0x3C,
+		0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+		0x00, 0x00, 0x00, 0x00,
+		0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+		0x80, 0x01, 0x00, 0x00, 0x14, 0x00, 0x02, 0x00,
+		0x0F, 0x00, 0x00,
+	};
+	return rstp_send_bpdu(test_bpdu, sizeof(test_bpdu));
+}
+
+/* ================================================================
  * Shell commands
  * ================================================================ */
 

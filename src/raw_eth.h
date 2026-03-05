@@ -41,4 +41,9 @@ int raw_eth_send(const uint8_t *dst_mac, uint16_t ethertype,
 int goose_send(const uint8_t *dst, const uint8_t *goose_pdu, size_t pdu_len);
 int rstp_send_bpdu(const uint8_t *bpdu, size_t len);
 
+/* Web terminal helpers */
+int  raw_eth_status_str(char *buf, size_t buf_size);
+int  raw_eth_test_send_goose(const uint8_t *dst);
+int  raw_eth_test_send_rstp(void);
+
 #endif /* RAW_ETH_H */
