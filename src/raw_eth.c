@@ -8,6 +8,7 @@
  *   - HSR tag   (IEC 62439-3, EtherType 0x892F)
  *   - HSR/PRP supervision (EtherType 0x88FB)
  *
+ * Two RX threads: one for ENET0 (switch_port@0) and one for ENET4 (enetc_psi0).
  * Also exposes shell commands: raw_eth status / raw_eth send goose|rstp
  */
 
@@ -24,15 +25,18 @@
 
 LOG_MODULE_REGISTER(raw_eth, LOG_LEVEL_INF);
 
-/* Shared with main.c — network_ready is non-static there */
+/* Shared with main.c */
 extern bool network_ready;
+extern bool network_ready2;
+extern struct net_if *eth1_iface;
 
 #ifndef ETH_P_ALL
 #define ETH_P_ALL 0x0003
 #endif
 
-/* Single socket used for both RX and TX */
-static int raw_sock = -1;
+/* One socket per physical port */
+static int raw_sock  = -1;   /* ENET0 (switch_port@0) */
+static int raw_sock2 = -1;   /* ENET4 (enetc_psi0)    */
 
 /* Per-protocol RX counters */
 static uint32_t rx_goose;
@@ -40,11 +44,9 @@ static uint32_t rx_rstp;
 static uint32_t rx_hsr;
 static uint32_t rx_hsr_sup;
 
-/* Total TX counter */
-static uint32_t tx_count;
-
-/* Total RX frames (all EtherTypes) — for diagnostics */
+/* Total counters */
 static uint32_t rx_total;
+static uint32_t tx_count;
 
 /* TX serialisation */
 static K_MUTEX_DEFINE(tx_mutex);
@@ -78,8 +80,6 @@ static void hsr_rx(struct raw_eth_hdr *hdr, uint8_t *payload, int len)
 	LOG_INF("HSR frame RX tag=0x892F from %02x:%02x:%02x:%02x:%02x:%02x len=%d",
 		hdr->src[0], hdr->src[1], hdr->src[2],
 		hdr->src[3], hdr->src[4], hdr->src[5], len);
-	/* TODO: strip HSR tag (6 bytes: EtherType + PathID + LSDU_size + SeqNr),
-	 *       duplicate detection via sequence number ring */
 }
 
 static void hsr_prp_supervision_rx(struct raw_eth_hdr *hdr, uint8_t *payload, int len)
@@ -87,37 +87,100 @@ static void hsr_prp_supervision_rx(struct raw_eth_hdr *hdr, uint8_t *payload, in
 	LOG_INF("HSR/PRP supervision RX from %02x:%02x:%02x:%02x:%02x:%02x len=%d",
 		hdr->src[0], hdr->src[1], hdr->src[2],
 		hdr->src[3], hdr->src[4], hdr->src[5], len);
-	/* TODO: update HSR/PRP node table from supervision TLVs */
 }
 
 /* ================================================================
- * RX thread
+ * Shared frame dispatcher (called by both RX threads)
+ * ================================================================ */
+
+static int diag_count;
+
+static void dispatch_frame(const uint8_t *frame_buf, int len, const char *iface_label)
+{
+	struct raw_eth_hdr *hdr = (struct raw_eth_hdr *)frame_buf;
+	uint16_t etype           = ntohs(hdr->ethertype);
+	uint8_t *payload         = (uint8_t *)frame_buf + sizeof(struct raw_eth_hdr);
+	int payload_len          = len - (int)sizeof(struct raw_eth_hdr);
+
+	rx_total++;
+
+	/* Diagnostic: dump first 20 non-IP/ARP frames across both ports */
+	if (etype != 0x0800 && etype != 0x0806 && etype != 0x86DD &&
+	    etype != 0x8100 && diag_count < 20) {
+		diag_count++;
+		LOG_INF("[%s] etype=0x%04x len=%d "
+			"%02x %02x %02x %02x %02x %02x %02x %02x "
+			"%02x %02x %02x %02x %02x %02x %02x %02x",
+			iface_label, etype, len,
+			frame_buf[0],  frame_buf[1],  frame_buf[2],  frame_buf[3],
+			frame_buf[4],  frame_buf[5],  frame_buf[6],  frame_buf[7],
+			frame_buf[8],  frame_buf[9],  frame_buf[10], frame_buf[11],
+			frame_buf[12], frame_buf[13], frame_buf[14], frame_buf[15]);
+	}
+
+	switch (etype) {
+	case ETH_P_GOOSE:
+		rx_goose++;
+		goose_rx(hdr, payload, payload_len);
+		break;
+	case ETH_P_HSR:
+		rx_hsr++;
+		hsr_rx(hdr, payload, payload_len);
+		break;
+	case ETH_P_HSR_SUP:
+		rx_hsr_sup++;
+		hsr_prp_supervision_rx(hdr, payload, payload_len);
+		break;
+	default:
+		if (etype < 0x0600 &&
+		    memcmp(hdr->dst, ETH_ADDR_STP, 6) == 0) {
+			rx_rstp++;
+			rstp_rx(hdr, payload, payload_len);
+		}
+		break;
+	}
+}
+
+/* ================================================================
+ * Generic RX thread
+ *   p1 = bool *ready    — wait until true before opening socket
+ *   p2 = struct net_if ** — pointer to iface variable (NULL → default)
+ *   p3 = int *sock_out  — where to store the opened socket fd
  * ================================================================ */
 
 #define RAW_ETH_STACK_SIZE 4096
 #define RAW_ETH_PRIORITY   7
 
-K_THREAD_STACK_DEFINE(raw_eth_stack, RAW_ETH_STACK_SIZE);
+K_THREAD_STACK_DEFINE(raw_eth_stack,  RAW_ETH_STACK_SIZE);
+K_THREAD_STACK_DEFINE(raw_eth_stack2, RAW_ETH_STACK_SIZE);
 static struct k_thread raw_eth_thread_data;
+static struct k_thread raw_eth_thread2_data;
 
 static void raw_eth_rx_thread(void *p1, void *p2, void *p3)
 {
-	ARG_UNUSED(p1);
-	ARG_UNUSED(p2);
-	ARG_UNUSED(p3);
+	bool            *ready    = (bool *)p1;
+	struct net_if  **iface_ref = (struct net_if **)p2;
+	int             *sock_out  = (int *)p3;
 
-	/* Wait for Ethernet link / IP stack to be ready */
-	while (!network_ready) {
+	/* Wait for IP stack / link to be ready */
+	while (!(*ready)) {
 		k_msleep(500);
 	}
 
-	struct net_if *iface = net_if_get_default();
+	struct net_if *iface = (iface_ref && *iface_ref)
+				? *iface_ref
+				: net_if_get_default();
 
-	raw_sock = zsock_socket(AF_PACKET, SOCK_RAW, htons(ETH_P_ALL));
-	if (raw_sock < 0) {
-		LOG_ERR("Failed to create AF_PACKET socket: %d", errno);
+	const char *label = (iface == net_if_get_default())
+			    ? "ENET0" : "ENET4";
+
+	int sock = zsock_socket(AF_PACKET, SOCK_RAW, htons(ETH_P_ALL));
+	if (sock < 0) {
+		LOG_ERR("[%s] Failed to create AF_PACKET socket: %d", label, errno);
 		return;
 	}
+
+	*sock_out = sock;
 
 	struct sockaddr_ll bind_addr = {
 		.sll_family   = AF_PACKET,
@@ -125,82 +188,38 @@ static void raw_eth_rx_thread(void *p1, void *p2, void *p3)
 		.sll_ifindex  = net_if_get_by_iface(iface),
 	};
 
-	if (zsock_bind(raw_sock, (struct sockaddr *)&bind_addr,
+	if (zsock_bind(sock, (struct sockaddr *)&bind_addr,
 		       sizeof(bind_addr)) < 0) {
-		LOG_ERR("Failed to bind raw socket: %d", errno);
-		zsock_close(raw_sock);
-		raw_sock = -1;
+		LOG_ERR("[%s] Failed to bind raw socket: %d", label, errno);
+		zsock_close(sock);
+		*sock_out = -1;
 		return;
 	}
 
-	/* Enable promiscuous mode so the NIC passes all L2 frames (including
-	 * GOOSE/HSR/PRP multicasts not in the hardware MAC filter) */
-	int promisc_ret = net_if_set_promisc(iface);
-	if (promisc_ret < 0) {
-		LOG_WRN("Promiscuous mode not supported by driver: %d", promisc_ret);
+	int ret = net_if_set_promisc(iface);
+	if (ret < 0) {
+		LOG_WRN("[%s] Promiscuous mode not supported: %d", label, ret);
 	} else {
-		LOG_INF("Promiscuous mode enabled");
+		LOG_INF("[%s] Promiscuous mode enabled", label);
 	}
 
-	LOG_INF("RX thread started (ifindex=%d)", bind_addr.sll_ifindex);
+	LOG_INF("[%s] RX thread started (ifindex=%d)", label, bind_addr.sll_ifindex);
 
-	static uint8_t frame_buf[1518];
+	uint8_t frame_buf[1518];
 
 	while (1) {
-		int len = zsock_recv(raw_sock, frame_buf, sizeof(frame_buf), 0);
+		int len = zsock_recv(sock, frame_buf, sizeof(frame_buf), 0);
 
 		if (len < (int)sizeof(struct raw_eth_hdr)) {
 			continue;
 		}
 
-		rx_total++;
-		struct raw_eth_hdr *hdr = (struct raw_eth_hdr *)frame_buf;
-		uint16_t etype           = ntohs(hdr->ethertype);
-		uint8_t *payload         = frame_buf + sizeof(struct raw_eth_hdr);
-		int payload_len          = len - (int)sizeof(struct raw_eth_hdr);
-
-		/* Diagnostic: dump first 20 bytes of any non-IP/ARP/IPv6 frame */
-		static int diag_count;
-		if (etype != 0x0800 && etype != 0x0806 && etype != 0x86DD &&
-		    etype != 0x8100 && diag_count < 20) {
-			diag_count++;
-			LOG_INF("Frame etype=0x%04x len=%d "
-				"bytes: %02x %02x %02x %02x %02x %02x %02x %02x "
-				"%02x %02x %02x %02x %02x %02x %02x %02x",
-				etype, len,
-				frame_buf[0],  frame_buf[1],  frame_buf[2],  frame_buf[3],
-				frame_buf[4],  frame_buf[5],  frame_buf[6],  frame_buf[7],
-				frame_buf[8],  frame_buf[9],  frame_buf[10], frame_buf[11],
-				frame_buf[12], frame_buf[13], frame_buf[14], frame_buf[15]);
-		}
-
-		switch (etype) {
-		case ETH_P_GOOSE:
-			rx_goose++;
-			goose_rx(hdr, payload, payload_len);
-			break;
-		case ETH_P_HSR:
-			rx_hsr++;
-			hsr_rx(hdr, payload, payload_len);
-			break;
-		case ETH_P_HSR_SUP:
-			rx_hsr_sup++;
-			hsr_prp_supervision_rx(hdr, payload, payload_len);
-			break;
-		default:
-			/* RSTP/STP BPDU: length field < 0x0600 and well-known dst */
-			if (etype < 0x0600 &&
-			    memcmp(hdr->dst, ETH_ADDR_STP, 6) == 0) {
-				rx_rstp++;
-				rstp_rx(hdr, payload, payload_len);
-			}
-			break;
-		}
+		dispatch_frame(frame_buf, len, label);
 	}
 }
 
 /* ================================================================
- * TX helpers
+ * TX helpers (always send via ENET0 socket)
  * ================================================================ */
 
 int raw_eth_send(const uint8_t *dst_mac, uint16_t ethertype,
@@ -250,46 +269,42 @@ int goose_send(const uint8_t *dst, const uint8_t *goose_pdu, size_t pdu_len)
 
 int rstp_send_bpdu(const uint8_t *bpdu, size_t bpdu_len)
 {
-	/*
-	 * RSTP frames use IEEE 802.3 length + LLC header, not an EtherType.
-	 * Layout after Ethernet header:
-	 *   [2] length  = 3 (LLC) + bpdu_len
-	 *   [1] DSAP    = 0x42
-	 *   [1] SSAP    = 0x42
-	 *   [1] Control = 0x03
-	 *   [N] BPDU data
-	 *
-	 * We build the payload here (LLC + BPDU) and let raw_eth_send fill
-	 * the Ethernet header; the "ethertype" field becomes the length.
-	 */
 	static uint8_t llc_bpdu[3 + 1518];
 
 	if (bpdu_len > sizeof(llc_bpdu) - 3) {
 		return -EMSGSIZE;
 	}
 
-	llc_bpdu[0] = 0x42; /* DSAP: STP */
-	llc_bpdu[1] = 0x42; /* SSAP: STP */
-	llc_bpdu[2] = 0x03; /* LLC UI */
+	llc_bpdu[0] = 0x42;
+	llc_bpdu[1] = 0x42;
+	llc_bpdu[2] = 0x03;
 	memcpy(llc_bpdu + 3, bpdu, bpdu_len);
 
-	uint16_t length = (uint16_t)(3 + bpdu_len);
-
-	return raw_eth_send(ETH_ADDR_STP, length, llc_bpdu, 3 + bpdu_len);
+	return raw_eth_send(ETH_ADDR_STP, (uint16_t)(3 + bpdu_len),
+			    llc_bpdu, 3 + bpdu_len);
 }
 
 /* ================================================================
- * Public init
+ * Public init — starts one RX thread per physical port
  * ================================================================ */
 
 void raw_eth_start(void)
 {
 	k_thread_create(&raw_eth_thread_data, raw_eth_stack,
 			K_THREAD_STACK_SIZEOF(raw_eth_stack),
-			raw_eth_rx_thread, NULL, NULL, NULL,
+			raw_eth_rx_thread,
+			&network_ready, NULL, &raw_sock,
 			RAW_ETH_PRIORITY, 0, K_NO_WAIT);
-	k_thread_name_set(&raw_eth_thread_data, "raw_eth_rx");
-	LOG_INF("Raw Ethernet framework initialised");
+	k_thread_name_set(&raw_eth_thread_data, "raw_eth_enet0");
+
+	k_thread_create(&raw_eth_thread2_data, raw_eth_stack2,
+			K_THREAD_STACK_SIZEOF(raw_eth_stack2),
+			raw_eth_rx_thread,
+			&network_ready2, &eth1_iface, &raw_sock2,
+			RAW_ETH_PRIORITY, 0, K_NO_WAIT);
+	k_thread_name_set(&raw_eth_thread2_data, "raw_eth_enet4");
+
+	LOG_INF("Raw Ethernet framework initialised (ENET0 + ENET4)");
 }
 
 /* ================================================================
@@ -300,14 +315,16 @@ int raw_eth_status_str(char *buf, size_t buf_size)
 {
 	return snprintf(buf, buf_size,
 		"=== Raw Ethernet Framework ===\n"
-		"Socket fd : %d (%s)\n"
+		"ENET0 sock: %d (%s)\n"
+		"ENET4 sock: %d (%s)\n"
 		"RX GOOSE  : %u\n"
 		"RX RSTP   : %u\n"
 		"RX HSR    : %u\n"
 		"RX HSR/sup: %u\n"
 		"RX total  : %u\n"
 		"TX total  : %u",
-		raw_sock, raw_sock >= 0 ? "open" : "not open",
+		raw_sock,  raw_sock  >= 0 ? "open" : "not open",
+		raw_sock2, raw_sock2 >= 0 ? "open" : "not open",
 		rx_goose, rx_rstp, rx_hsr, rx_hsr_sup, rx_total, tx_count);
 }
 
@@ -342,8 +359,10 @@ static int cmd_raw_eth_status(const struct shell *sh, size_t argc, char **argv)
 	ARG_UNUSED(argv);
 
 	shell_print(sh, "=== Raw Ethernet Framework ===");
-	shell_print(sh, "Socket fd : %d (%s)", raw_sock,
-		    raw_sock >= 0 ? "open" : "not open");
+	shell_print(sh, "ENET0 sock: %d (%s)", raw_sock,
+		    raw_sock  >= 0 ? "open" : "not open");
+	shell_print(sh, "ENET4 sock: %d (%s)", raw_sock2,
+		    raw_sock2 >= 0 ? "open" : "not open");
 	shell_print(sh, "RX GOOSE  : %u", rx_goose);
 	shell_print(sh, "RX RSTP   : %u", rx_rstp);
 	shell_print(sh, "RX HSR    : %u", rx_hsr);
@@ -384,10 +403,9 @@ static int cmd_raw_eth_send_goose(const struct shell *sh,
 		return -EINVAL;
 	}
 
-	/* Minimal test GOOSE payload (placeholder — not a valid PDU) */
 	static const uint8_t test_goose[] = {
-		0x61, 0x04,        /* GOOSE PDU tag + length */
-		0x00, 0x00, 0x00, 0x00  /* placeholder data */
+		0x61, 0x04,
+		0x00, 0x00, 0x00, 0x00
 	};
 
 	int ret = goose_send(dst, test_goose, sizeof(test_goose));
@@ -408,21 +426,20 @@ static int cmd_raw_eth_send_rstp(const struct shell *sh,
 	ARG_UNUSED(argc);
 	ARG_UNUSED(argv);
 
-	/* Minimal RST BPDU (IEEE 802.1w Config BPDU, 35 bytes) */
 	static const uint8_t test_bpdu[] = {
-		0x00, 0x00,  /* Protocol ID = 0 (STP) */
-		0x02,        /* Version = 2 (RSTP) */
-		0x02,        /* Message type: RST BPDU */
-		0x3C,        /* Flags */
-		0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,  /* Root BID */
-		0x00, 0x00, 0x00, 0x00,  /* Root path cost */
-		0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,  /* Bridge BID */
-		0x80, 0x01,  /* Port ID */
-		0x00, 0x00,  /* Message age */
-		0x14, 0x00,  /* Max age (20 s) */
-		0x02, 0x00,  /* Hello time (2 s) */
-		0x0F, 0x00,  /* Forward delay (15 s) */
-		0x00,        /* Version 1 length */
+		0x00, 0x00,
+		0x02,
+		0x02,
+		0x3C,
+		0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+		0x00, 0x00, 0x00, 0x00,
+		0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+		0x80, 0x01,
+		0x00, 0x00,
+		0x14, 0x00,
+		0x02, 0x00,
+		0x0F, 0x00,
+		0x00,
 	};
 
 	int ret = rstp_send_bpdu(test_bpdu, sizeof(test_bpdu));

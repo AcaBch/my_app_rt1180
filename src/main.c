@@ -53,7 +53,7 @@ bool network_ready = false;
 bool network_ready2 = false;
 static char ip_addr_str[NET_IPV4_ADDR_LEN] = "192.168.0.32";    /* ENET0 (switch_port@0) */
 static char ip_addr_str2[NET_IPV4_ADDR_LEN] = "192.168.0.132";  /* ENET4 (enetc_psi0)   */
-static struct net_if *eth1_iface = NULL;
+struct net_if *eth1_iface = NULL;
 
 /* Button pressed callback */
 void button_pressed(const struct device *dev, struct gpio_callback *cb, uint32_t pins)
@@ -682,6 +682,47 @@ static void configure_eth1(void)
 	LOG_INF("ENET4 (enetc_psi0) configured: 192.168.0.132/24");
 }
 
+/* ==================== Switch Ring Ports Configuration ==================== */
+
+static void configure_switch_ring_ports(void)
+{
+	struct in_addr addr, netmask, gw;
+	const char *ring_port_names[] = { "switch_port@2", "switch_port@3" };
+
+	net_addr_pton(AF_INET, "192.168.0.33",  &addr);
+	net_addr_pton(AF_INET, "255.255.255.0", &netmask);
+	net_addr_pton(AF_INET, "192.168.0.1",   &gw);
+
+	for (int p = 0; p < 2; p++) {
+		for (int i = 1; i <= 10; i++) {
+			struct net_if *iface = net_if_get_by_index(i);
+
+			if (!iface) {
+				continue;
+			}
+			if (strcmp(net_if_get_device(iface)->name,
+				   ring_port_names[p]) != 0) {
+				continue;
+			}
+
+			net_if_up(iface);
+
+			if (!net_if_ipv4_addr_add(iface, &addr,
+						  NET_ADDR_MANUAL, 0)) {
+				LOG_ERR("%s: failed to add 192.168.0.33",
+					ring_port_names[p]);
+			} else {
+				net_if_ipv4_set_netmask_by_addr(iface, &addr,
+								&netmask);
+				net_if_ipv4_set_gw(iface, &gw);
+				LOG_INF("%s configured: 192.168.0.33/24",
+					ring_port_names[p]);
+			}
+			break;
+		}
+	}
+}
+
 /* ==================== Network Event Handler ==================== */
 
 static void net_mgmt_handler(struct net_mgmt_event_callback *cb,
@@ -778,6 +819,9 @@ int main(void)
 
 	/* Configure ENET4 (enetc_psi0) with second static IP 192.168.0.132 */
 	configure_eth1();
+
+	/* Configure switch ring ports (ENET2/ENET3) with 192.168.0.33 */
+	configure_switch_ring_ports();
 
 	/* Start HTTPS server thread */
 	k_thread_create(&https_thread_data, https_stack,
