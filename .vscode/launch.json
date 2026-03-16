@@ -1,0 +1,17 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Debug (LinkServer)",
+            "type": "cortex-debug",
+            "request": "launch",
+            "servertype": "external",
+            "gdbTarget": "localhost:3333",
+            "executable": "${workspaceFolder}/build/zephyr/zephyr.elf",
+            "armToolchainPath": "/home/acabch/zephyr/zephyr-sdk-0.16.8/arm-zephyr-eabi/bin/",
+            "gdbPath": "/home/acabch/zephyr/zephyr-sdk-0.16.8/arm-zephyr-eabi/bin/arm-zephyr-eabi-gdb",
+            "runToEntryPoint": "main",
+            "preLaunchTask": "LinkServer: Start GDB Server"
+        }
+    ]
+}

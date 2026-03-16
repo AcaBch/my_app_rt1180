@@ -312,10 +312,14 @@ static int execute_web_cmd(const char *cmd, char *output, size_t output_size)
 				dst[i] = (uint8_t)b[i];
 			}
 			int ret = raw_eth_test_send_goose(dst);
-			len = snprintf(output, output_size,
-				ret > 0 ? "GOOSE test frame sent to %s (%d bytes)"
-					: "goose_send failed: %d",
-				mac_str, ret);
+			if (ret > 0) {
+				len = snprintf(output, output_size,
+					"GOOSE test frame sent to %s (%d bytes)",
+					mac_str, ret);
+			} else {
+				len = snprintf(output, output_size,
+					"goose_send failed: %d", ret);
+			}
 		} else {
 			len = snprintf(output, output_size,
 				"Usage: raw_eth send goose <xx:xx:xx:xx:xx:xx>");
@@ -644,11 +648,11 @@ int main(void)
 {
 	int ret;
 
-	printk("\n==========================================\n");
+	printk("\n=============================================\n");
 	printk("  My Custom Zephyr App - MIMXRT1180-EVK\n");
 	printk("  Board: %s\n", CONFIG_BOARD);
-	printk("  Features: GPIO, Shell, HTTPS Server\n");
-	printk("==========================================\n\n");
+	printk("  Features: GPIO, Shell, HTTPS Server, RAW Eth\n");
+	printk("==============================================\n\n");
 
 	/* Initialize LED */
 	if (!gpio_is_ready_dt(&led)) {

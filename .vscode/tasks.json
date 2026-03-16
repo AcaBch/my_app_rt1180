@@ -1,0 +1,72 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "West: Build",
+            "type": "shell",
+            "command": "cd /home/acabch/zephyrproject && west build my_app_rt1180 --board mimxrt1180_evk/mimxrt1189/cm33 --build-dir my_app_rt1180/build",
+            "group": {
+                "kind": "build",
+                "isDefault": true
+            },
+            "presentation": {
+                "reveal": "always",
+                "panel": "shared"
+            },
+            "problemMatcher": []
+        },
+        {
+            "label": "West: Build (Pristine)",
+            "type": "shell",
+            "command": "cd /home/acabch/zephyrproject && west build my_app_rt1180 --board mimxrt1180_evk/mimxrt1189/cm33 --build-dir my_app_rt1180/build --pristine",
+            "group": "build",
+            "presentation": {
+                "reveal": "always",
+                "panel": "shared"
+            },
+            "problemMatcher": []
+        },
+        {
+            "label": "West: Flash",
+            "type": "shell",
+            "command": "cd /home/acabch/zephyrproject && west flash --build-dir my_app_rt1180/build",
+            "group": "build",
+            "presentation": {
+                "reveal": "always",
+                "panel": "shared"
+            },
+            "problemMatcher": []
+        },
+        {
+            "label": "LinkServer: Start GDB Server",
+            "type": "shell",
+            "command": "/usr/local/LinkServer_1.5.30/LinkServer gdbserver --gdb-port 3333 MIMXRT1189xxxxx:MIMXRT1180-EVK",
+            "isBackground": true,
+            "presentation": {
+                "reveal": "always",
+                "panel": "dedicated"
+            },
+            "problemMatcher": {
+                "pattern": {
+                    "regexp": "^$"
+                },
+                "background": {
+                    "activeOnStart": true,
+                    "beginsPattern": "^.*LinkServer.*$",
+                    "endsPattern": "^.*Waiting for GDB connection.*$"
+                }
+            }
+        },
+        {
+            "label": "West: Build & Flash",
+            "type": "shell",
+            "command": "cd /home/acabch/zephyrproject && west build my_app_rt1180 --board mimxrt1180_evk/mimxrt1189/cm33 --build-dir my_app_rt1180/build && west flash --build-dir my_app_rt1180/build",
+            "group": "build",
+            "presentation": {
+                "reveal": "always",
+                "panel": "shared"
+            },
+            "problemMatcher": []
+        }
+    ]
+}
