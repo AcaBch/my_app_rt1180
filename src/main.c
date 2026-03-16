@@ -50,7 +50,10 @@ static volatile int led_on = 0;
 /* Network management callback */
 static struct net_mgmt_event_callback mgmt_cb;
 bool network_ready = false;
-static char ip_addr_str[NET_IPV4_ADDR_LEN] = "192.168.0.132";
+bool network_ready2 = false;
+static char ip_addr_str[NET_IPV4_ADDR_LEN] = "192.168.0.32";    /* ENET0 (switch_port@0) */
+static char ip_addr_str2[NET_IPV4_ADDR_LEN] = "192.168.0.132";  /* ENET4 (enetc_psi0)   */
+static struct net_if *eth1_iface = NULL;
 
 /* Button pressed callback */
 void button_pressed(const struct device *dev, struct gpio_callback *cb, uint32_t pins)
@@ -495,6 +498,7 @@ ret = tls_credential_add(TLS_TAG, TLS_CREDENTIAL_SERVER_CERTIFICATE,
 	LOG_INF("====================================");
 	LOG_INF("HTTPS server listening on port %d", HTTPS_PORT);
 	LOG_INF("Open https://%s/ in your browser", ip_addr_str);
+	LOG_INF("Open https://%s/ via switch port", ip_addr_str2);
 	LOG_INF("(Accept the self-signed certificate warning)");
 	LOG_INF("====================================");
 
@@ -606,11 +610,11 @@ static int cmd_status(const struct shell *sh, size_t argc, char **argv)
 	shell_print(sh, "Button presses: %d", button_press_count);
 	shell_print(sh, "LED state: %s", led_on ? "ON" : "OFF");
 	shell_print(sh, "Uptime: %lld ms", k_uptime_get());
-	shell_print(sh, "Network: %s", network_ready ? "Ready" : "Not ready");
+	shell_print(sh, "ENET0 (switch_port@0): %s", network_ready ? ip_addr_str : "Not ready");
+	shell_print(sh, "ENET4 (enetc_psi0):   %s", network_ready2 ? ip_addr_str2 : "Not ready");
 	if (network_ready) {
-		shell_print(sh, "IP Address: %s", ip_addr_str);
-		shell_print(sh, "HTTPS: https://%s/", ip_addr_str);
-		shell_print(sh, "HTTP:  http://%s/ (redirects to HTTPS)", ip_addr_str);
+		shell_print(sh, "HTTPS: https://%s/ or https://%s/", ip_addr_str, ip_addr_str2);
+		shell_print(sh, "HTTP:  http://%s/ or http://%s/", ip_addr_str, ip_addr_str2);
 	}
 	return 0;
 }
@@ -625,6 +629,59 @@ SHELL_STATIC_SUBCMD_SET_CREATE(led_cmds,
 SHELL_CMD_REGISTER(led, &led_cmds, "LED control commands", NULL);
 SHELL_CMD_REGISTER(status, NULL, "Show application status", cmd_status);
 
+/* ==================== ENET4 (enetc_psi0) Static IP Configuration ==================== */
+
+static void configure_eth1(void)
+{
+	const struct device *dev = DEVICE_DT_GET(DT_NODELABEL(enetc_psi0));
+	struct in_addr addr, netmask, gw;
+
+	/* Log all available interfaces */
+	LOG_INF("Network interfaces:");
+	for (int i = 1; i <= 10; i++) {
+		struct net_if *iface = net_if_get_by_index(i);
+
+		if (iface) {
+			LOG_INF("  [%d] %s%s", i,
+				net_if_get_device(iface)->name,
+				(net_if_get_device(iface) == dev) ? " <-- enetc_psi0 (ENET4)" : "");
+		}
+	}
+
+	/* Find the enetc_psi0 interface by matching its device pointer */
+	eth1_iface = NULL;
+	for (int i = 1; i <= 10; i++) {
+		struct net_if *iface = net_if_get_by_index(i);
+
+		if (iface && net_if_get_device(iface) == dev) {
+			eth1_iface = iface;
+			LOG_INF("Found enetc_psi0 (ENET4) at index [%d]", i);
+			break;
+		}
+	}
+
+	if (!eth1_iface) {
+		LOG_WRN("enetc_psi0 interface not found");
+		return;
+	}
+
+	net_if_up(eth1_iface);
+
+	net_addr_pton(AF_INET, "192.168.0.132", &addr);
+	net_addr_pton(AF_INET, "255.255.255.0", &netmask);
+	net_addr_pton(AF_INET, "192.168.0.1", &gw);
+
+	if (!net_if_ipv4_addr_add(eth1_iface, &addr, NET_ADDR_MANUAL, 0)) {
+		LOG_ERR("Failed to add IP to enetc_psi0 (ENET4)");
+		return;
+	}
+
+	net_if_ipv4_set_netmask_by_addr(eth1_iface, &addr, &netmask);
+	net_if_ipv4_set_gw(eth1_iface, &gw);
+
+	LOG_INF("ENET4 (enetc_psi0) configured: 192.168.0.132/24");
+}
+
 /* ==================== Network Event Handler ==================== */
 
 static void net_mgmt_handler(struct net_mgmt_event_callback *cb,
@@ -635,9 +692,19 @@ static void net_mgmt_handler(struct net_mgmt_event_callback *cb,
 
 		if (cfg && cfg->ip.ipv4) {
 			struct in_addr *addr = &cfg->ip.ipv4->unicast[0].ipv4.address.in_addr;
-			net_addr_ntop(AF_INET, addr, ip_addr_str, sizeof(ip_addr_str));
-			LOG_INF("Network ready! IP: %s", ip_addr_str);
-			network_ready = true;
+			char addr_str[NET_IPV4_ADDR_LEN];
+
+			net_addr_ntop(AF_INET, addr, addr_str, sizeof(addr_str));
+
+			if (iface == net_if_get_default()) {
+				strncpy(ip_addr_str, addr_str, sizeof(ip_addr_str));
+				network_ready = true;
+				LOG_INF("ENET0 (switch_port@0) ready! IP: %s", ip_addr_str);
+			} else if (eth1_iface != NULL && iface == eth1_iface) {
+				strncpy(ip_addr_str2, addr_str, sizeof(ip_addr_str2));
+				network_ready2 = true;
+				LOG_INF("ENET4 (enetc_psi0) ready! IP: %s", ip_addr_str2);
+			}
 		}
 	}
 }
@@ -695,19 +762,22 @@ int main(void)
 	net_mgmt_add_event_callback(&mgmt_cb);
 
 	LOG_INF("Starting network...");
-	LOG_INF("Static IP: %s", ip_addr_str);
+	LOG_INF("ENET0 (switch_port@0) static IP: %s", ip_addr_str);
 
-	/* Check if network is already configured (static IP case) */
+	/* Check if eth0 is already configured (static IP via CONFIG_NET_CONFIG_SETTINGS) */
 	struct net_if *iface = net_if_get_default();
 	if (iface) {
 		struct net_if_config *cfg = net_if_get_config(iface);
 		if (cfg && cfg->ip.ipv4 && cfg->ip.ipv4->unicast[0].ipv4.is_used) {
 			struct in_addr *addr = &cfg->ip.ipv4->unicast[0].ipv4.address.in_addr;
 			net_addr_ntop(AF_INET, addr, ip_addr_str, sizeof(ip_addr_str));
-			LOG_INF("Network ready! IP: %s", ip_addr_str);
+			LOG_INF("ENET0 (switch_port@0) ready! IP: %s", ip_addr_str);
 			network_ready = true;
 		}
 	}
+
+	/* Configure ENET4 (enetc_psi0) with second static IP 192.168.0.132 */
+	configure_eth1();
 
 	/* Start HTTPS server thread */
 	k_thread_create(&https_thread_data, https_stack,
